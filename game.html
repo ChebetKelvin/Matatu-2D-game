@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Matatu Dodger</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      background: #f3e9d2;
+      color: #1d1d1b;
+      font-family: system-ui, sans-serif;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      color: #e8412c;
+    }
+
+    .hud {
+      display: flex;
+      justify-content: space-between;
+      width: min(360px, 94vw);
+    }
+
+    canvas {
+      width: min(360px, 94vw);
+      height: auto;
+      border: 4px solid #1d1d1b;
+      border-radius: 16px;
+      touch-action: none;
+    }
+
+    button {
+      font: inherit;
+      background: #e8412c;
+      color: white;
+      border: 3px solid #1d1d1b;
+      border-radius: 12px;
+      padding: 10px 22px;
+      cursor: pointer;
+    }
+
+    p {
+      margin: 0;
+      max-width: 340px;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Matatu Dodger</h1>
+  <div class="hud">
+    <span>Score: <span id="score">0</span></span>
+    <span>Best: <span id="best">0</span></span>
+  </div>
+  <canvas id="c" width="360" height="540"></canvas>
+  <button id="start">Start driving</button>
+  <p>Arrow keys or A / D to change lanes. On a phone, tap the left or right side. Grab coins, dodge traffic!</p>
+
+  <script>
+    // ---------- 1. SETUP ----------
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d");
+
+    const W = 360;
+    const H = 540;
+    const LANES = 4;
+    const LANE_W = W / LANES;
+    const PLAYER_Y = H - 90;
+    const COLORS = ["#3b82f6", "#a855f7", "#f97316", "#ef4444", "#14b8a6"];
+
+    // ---------- 2. STATE ----------
+    let state = "ready";   // "ready", "playing" or "over"
+    let lane, px;          // which lane the player wants, and where they are drawn
+    let dist, speed;       // how far the road moved, and how fast
+    let bonus;             // points from coins
+    let score;
+    let best = 0;
+    let spawnTimer;
+    let cars = [];
+    let coins = [];
+
+    try { best = Number(localStorage.getItem("matatuBest")) || 0; } catch (e) { }
+    document.getElementById("best").textContent = best;
+
+    function resetGame() {
+      lane = 1;
+      px = laneX(lane);
+      dist = 0;
+      speed = 220;
+      bonus = 0;
+      score = 0;
+      spawnTimer = 0;
+      cars = [];
+      coins = [];
+    }
+
+    // ---------- 3. HELPERS ----------
+    function laneX(l) {
+      return l * LANE_W + LANE_W / 2;
+    }
+
+    function box(cx, cy, w, h, r, color) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r);
+      ctx.fill();
+    }
+
+    // Do two boxes overlap? (both described by centre x, y and size)
+    function overlaps(a, b) {
+      return Math.abs(a.x - b.x) < (a.w + b.w) / 2 - 4 &&
+        Math.abs(a.y - b.y) < (a.h + b.h) / 2 - 4;
+    }
+
+    // ---------- 4. SPAWNING ----------
+    function makeCar(l) {
+      const t = Math.random();
+      const isBoda = t < 0.25;
+      return {
+        x: laneX(l),
+        y: -60,
+        w: isBoda ? 22 : 44,
+        h: isBoda ? 44 : (t < 0.6 ? 70 : 84),
+        color: COLORS[Math.floor(Math.random() * COLORS.length)],
+        boda: isBoda
+      };
+    }
+
+    function spawn() {
+      const a = Math.floor(Math.random() * LANES);
+      cars.push(makeCar(a));
+
+      // 40% of the time add a second car in a different lane,
+      // never three, so there is always a gap to escape through
+      if (Math.random() < 0.4) {
+        const b = (a + 1 + Math.floor(Math.random() * (LANES - 1))) % LANES;
+        cars.push(makeCar(b));
+      }
+
+      // 60% of the time add a coin in a lane with no car at the top
+      if (Math.random() < 0.6) {
+        const l = Math.floor(Math.random() * LANES);
+        const blocked = cars.some(c => c.x === laneX(l) && c.y < 0);
+        if (!blocked) coins.push({ x: laneX(l), y: -140 });
+      }
+    }
+
+    // ---------- 5. DRAWING ----------
+    function drawRoad() {
+      ctx.fillStyle = "#3a3a3a";
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.strokeStyle = "#f5f0dc";
+      ctx.lineWidth = 4;
+      ctx.setLineDash([26, 22]);
+      ctx.lineDashOffset = -(dist % 48);
+      for (let i = 1; i < LANES; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * LANE_W, 0);
+        ctx.lineTo(i * LANE_W, H);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+
+    function drawCar(c) {
+      if (c.boda) {
+        box(c.x, c.y, c.w, c.h, 8, c.color);
+        box(c.x, c.y - 8, 14, 14, 7, "#222");   // the rider
+        return;
+      }
+      box(c.x, c.y, c.w, c.h, 10, c.color);
+      box(c.x, c.y + c.h * 0.12, c.w - 12, c.h * 0.28, 5, "#bfe8ff");
+      box(c.x - c.w / 2 + 3, c.y - c.h / 2 + 10, 6, 12, 2, "#111");
+      box(c.x + c.w / 2 - 3, c.y - c.h / 2 + 10, 6, 12, 2, "#111");
+    }
+
+    function drawCoin(c) {
+      ctx.fillStyle = "#ffc531";
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#a37400";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.fillStyle = "#a37400";
+      ctx.font = "bold 13px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Sh", c.x, c.y + 5);
+    }
+
+    function drawMatatu() {
+      const py = PLAYER_Y;
+      box(px, py, 50, 92, 10, "#ffd400");
+      box(px, py - 38, 50, 16, 6, "#1f9d55");
+      box(px, py - 26, 40, 18, 5, "#bfe8ff");
+      box(px, py + 22, 40, 22, 5, "#bfe8ff");
+      ctx.fillStyle = "#111";
+      ctx.font = "bold 9px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("NAIROBI", px, py + 4);
+      box(px - 25, py - 30, 6, 14, 2, "#111");
+      box(px + 25, py - 30, 6, 14, 2, "#111");
+      box(px - 25, py + 30, 6, 14, 2, "#111");
+      box(px + 25, py + 30, 6, 14, 2, "#111");
+    }
+
+    function drawOverlay() {
+      ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "white";
+      ctx.textAlign = "center";
+      ctx.font = "bold 32px sans-serif";
+      ctx.fillText(state === "over" ? "Crash!" : "Ready?", W / 2, H / 2 - 10);
+      ctx.font = "bold 18px sans-serif";
+      ctx.fillText(state === "over" ? "You scored " + score : "Press Start driving", W / 2, H / 2 + 22);
+    }
+
+    // ---------- 6. UPDATE ----------
+    function update(dt) {
+      speed += dt * 6;            // the game slowly gets faster
+      dist += speed * dt;
+      px += (laneX(lane) - px) * Math.min(1, dt * 14);
+
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) {
+        spawn();
+        spawnTimer = Math.max(0.45, 1.1 - speed / 700);
+      }
+
+      const me = { x: px, y: PLAYER_Y, w: 50, h: 92 };
+
+      for (const c of cars) {
+        c.y += speed * dt;
+        if (overlaps(me, c)) crash();
+      }
+
+      for (const c of coins) {
+        c.y += speed * dt;
+        if (Math.abs(c.x - px) < 30 && Math.abs(c.y - PLAYER_Y) < 50) {
+          c.taken = true;
+          bonus += 10;
+        }
+      }
+
+      cars = cars.filter(c => c.y < H + 80);
+      coins = coins.filter(c => !c.taken && c.y < H + 30);
+
+      score = Math.floor(dist / 40) + bonus;
+      document.getElementById("score").textContent = score;
+    }
+
+    function crash() {
+      state = "over";
+      if (score > best) {
+        best = score;
+        document.getElementById("best").textContent = best;
+        try { localStorage.setItem("matatuBest", best); } catch (e) { }
+      }
+      startBtn.textContent = "Drive again";
+    }
+
+    // ---------- 7. INPUT ----------
+    const startBtn = document.getElementById("start");
+
+    function startGame() {
+      resetGame();
+      state = "playing";
+      startBtn.textContent = "Restart";
+    }
+
+    function steer(direction) {
+      if (state !== "playing") return;
+      lane = Math.max(0, Math.min(LANES - 1, lane + direction));
+    }
+
+    startBtn.addEventListener("click", startGame);
+
+    addEventListener("keydown", function (e) {
+      if (e.key === "ArrowLeft" || e.key === "a") { steer(-1); e.preventDefault(); }
+      if (e.key === "ArrowRight" || e.key === "d") { steer(1); e.preventDefault(); }
+    });
+
+    canvas.addEventListener("pointerdown", function (e) {
+      const r = canvas.getBoundingClientRect();
+      steer(e.clientX < r.left + r.width / 2 ? -1 : 1);
+    });
+
+    // ---------- 8. THE LOOP ----------
+    let last = 0;
+
+    function loop(time) {
+      const dt = Math.min(0.04, (time - last) / 1000 || 0);
+      last = time;
+
+      if (state === "playing") update(dt);
+
+      drawRoad();
+      coins.forEach(drawCoin);
+      cars.forEach(drawCar);
+      drawMatatu();
+      if (state !== "playing") drawOverlay();
+
+      requestAnimationFrame(loop);
+    }
+
+    resetGame();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+
+</html>
