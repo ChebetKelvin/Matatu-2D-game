@@ -39,6 +39,11 @@
       touch-action: none;
     }
 
+    .buttons {
+      display: flex;
+      gap: 10px;
+    }
+
     button {
       font: inherit;
       background: #e8412c;
@@ -47,6 +52,11 @@
       border-radius: 12px;
       padding: 10px 22px;
       cursor: pointer;
+    }
+
+    button.alt {
+      background: #f3e9d2;
+      color: #1d1d1b;
     }
 
     p {
@@ -64,8 +74,11 @@
     <span>Best: <span id="best">0</span></span>
   </div>
   <canvas id="c" width="360" height="540"></canvas>
-  <button id="start">Start driving</button>
-  <p>Arrow keys or A / D to change lanes. On a phone, tap the left or right side. Grab coins, dodge traffic!</p>
+  <div class="buttons">
+    <button id="start">Start driving</button>
+    <button id="mute" class="alt">Sound: on</button>
+  </div>
+  <p>Arrow keys or A / D to change lanes. Space to honk. M to mute. On a phone, tap the left or right side.</p>
 
   <script>
     // ---------- 1. SETUP ----------
@@ -81,9 +94,9 @@
 
     // ---------- 2. STATE ----------
     let state = "ready";   // "ready", "playing" or "over"
-    let lane, px;          // which lane the player wants, and where they are drawn
-    let dist, speed;       // how far the road moved, and how fast
-    let bonus;             // points from coins
+    let lane, px;
+    let dist, speed;
+    let bonus;
     let score;
     let best = 0;
     let spawnTimer;
@@ -117,13 +130,57 @@
       ctx.fill();
     }
 
-    // Do two boxes overlap? (both described by centre x, y and size)
     function overlaps(a, b) {
       return Math.abs(a.x - b.x) < (a.w + b.w) / 2 - 4 &&
         Math.abs(a.y - b.y) < (a.h + b.h) / 2 - 4;
     }
 
-    // ---------- 4. SPAWNING ----------
+    // ---------- 4. SOUND ----------
+    // Browsers block audio until the player clicks or taps something,
+    // so we create the audio engine inside the Start button's click.
+    let audio = null;
+    let muted = false;
+
+    function initAudio() {
+      if (!audio) audio = new AudioContext();
+      if (audio.state === "suspended") audio.resume();
+    }
+
+    // One tone that slides from freqStart to freqEnd while fading out.
+    function beep(freqStart, freqEnd, duration, type, volume) {
+      if (!audio || muted) return;
+
+      const osc = audio.createOscillator();
+      const gain = audio.createGain();
+      const now = audio.currentTime;
+
+      osc.type = type;
+      osc.frequency.setValueAtTime(freqStart, now);
+      osc.frequency.exponentialRampToValueAtTime(freqEnd, now + duration);
+
+      gain.gain.setValueAtTime(volume, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+      osc.connect(gain);
+      gain.connect(audio.destination);
+      osc.start(now);
+      osc.stop(now + duration);
+    }
+
+    function coinSound() { beep(880, 1320, 0.12, "square", 0.08); }
+    function crashSound() { beep(160, 40, 0.5, "sawtooth", 0.25); }
+    function laneSound() { beep(300, 200, 0.06, "triangle", 0.05); }
+    function hornSound() {
+      beep(400, 390, 0.35, "sawtooth", 0.08);
+      beep(500, 490, 0.35, "sawtooth", 0.08);
+    }
+
+    function toggleMute() {
+      muted = !muted;
+      document.getElementById("mute").textContent = muted ? "Sound: off" : "Sound: on";
+    }
+
+    // ---------- 5. SPAWNING ----------
     function makeCar(l) {
       const t = Math.random();
       const isBoda = t < 0.25;
@@ -141,8 +198,7 @@
       const a = Math.floor(Math.random() * LANES);
       cars.push(makeCar(a));
 
-      // 40% of the time add a second car in a different lane,
-      // never three, so there is always a gap to escape through
+      // 40% of the time add a second car in a different lane (never three)
       if (Math.random() < 0.4) {
         const b = (a + 1 + Math.floor(Math.random() * (LANES - 1))) % LANES;
         cars.push(makeCar(b));
@@ -156,7 +212,7 @@
       }
     }
 
-    // ---------- 5. DRAWING ----------
+    // ---------- 6. DRAWING ----------
     function drawRoad() {
       ctx.fillStyle = "#3a3a3a";
       ctx.fillRect(0, 0, W, H);
@@ -177,7 +233,7 @@
     function drawCar(c) {
       if (c.boda) {
         box(c.x, c.y, c.w, c.h, 8, c.color);
-        box(c.x, c.y - 8, 14, 14, 7, "#222");   // the rider
+        box(c.x, c.y - 8, 14, 14, 7, "#222");
         return;
       }
       box(c.x, c.y, c.w, c.h, 10, c.color);
@@ -227,9 +283,9 @@
       ctx.fillText(state === "over" ? "You scored " + score : "Press Start driving", W / 2, H / 2 + 22);
     }
 
-    // ---------- 6. UPDATE ----------
+    // ---------- 7. UPDATE ----------
     function update(dt) {
-      speed += dt * 6;            // the game slowly gets faster
+      speed += dt * 6;
       dist += speed * dt;
       px += (laneX(lane) - px) * Math.min(1, dt * 14);
 
@@ -248,9 +304,10 @@
 
       for (const c of coins) {
         c.y += speed * dt;
-        if (Math.abs(c.x - px) < 30 && Math.abs(c.y - PLAYER_Y) < 50) {
+        if (!c.taken && Math.abs(c.x - px) < 30 && Math.abs(c.y - PLAYER_Y) < 50) {
           c.taken = true;
           bonus += 10;
+          coinSound();
         }
       }
 
@@ -262,7 +319,9 @@
     }
 
     function crash() {
+      if (state === "over") return;   // stops a double crash sound
       state = "over";
+      crashSound();
       if (score > best) {
         best = score;
         document.getElementById("best").textContent = best;
@@ -271,10 +330,11 @@
       startBtn.textContent = "Drive again";
     }
 
-    // ---------- 7. INPUT ----------
+    // ---------- 8. INPUT ----------
     const startBtn = document.getElementById("start");
 
     function startGame() {
+      initAudio();
       resetGame();
       state = "playing";
       startBtn.textContent = "Restart";
@@ -282,14 +342,19 @@
 
     function steer(direction) {
       if (state !== "playing") return;
+      const old = lane;
       lane = Math.max(0, Math.min(LANES - 1, lane + direction));
+      if (lane !== old) laneSound();
     }
 
     startBtn.addEventListener("click", startGame);
+    document.getElementById("mute").addEventListener("click", toggleMute);
 
     addEventListener("keydown", function (e) {
       if (e.key === "ArrowLeft" || e.key === "a") { steer(-1); e.preventDefault(); }
       if (e.key === "ArrowRight" || e.key === "d") { steer(1); e.preventDefault(); }
+      if (e.key === " " && state === "playing") { hornSound(); e.preventDefault(); }
+      if (e.key === "m") toggleMute();
     });
 
     canvas.addEventListener("pointerdown", function (e) {
@@ -297,7 +362,7 @@
       steer(e.clientX < r.left + r.width / 2 ? -1 : 1);
     });
 
-    // ---------- 8. THE LOOP ----------
+    // ---------- 9. THE LOOP ----------
     let last = 0;
 
     function loop(time) {
